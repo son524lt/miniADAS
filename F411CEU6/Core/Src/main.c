@@ -62,8 +62,8 @@ int main(void)
   #define ECHO_PORT GPIOB
   #define ECHO_PIN 6
   // define timer
-  #define BLINK_TIMER TIM3
-  #define BLINK_TIMER_IRQn TIM3_IRQn
+  #define BLINK_TIMER TIM10
+  #define BLINK_TIMER_IRQn TIM1_UP_TIM10_IRQn
   #define SONAR_TIMER TIM4
   #define SONAR_TIMER_IRQn TIM4_IRQn
   // RCC config
@@ -88,8 +88,8 @@ int main(void)
   BLINK_TIMER->DIER |= 0b1; // Enable update interrupt
   BLINK_TIMER->CR1 |= 0b1; // Enable timer
   // BLINK_TIMER->CR1 |= 0b1 << 4; // Downcounting mode
-  NVIC_SetPriority(TIM3_IRQn, NVIC_EncodePriority(NVIC_GetPriorityGrouping(), 4, 0));
-  NVIC_EnableIRQ(TIM3_IRQn);
+  NVIC_SetPriority(BLINK_TIMER_IRQn, NVIC_EncodePriority(NVIC_GetPriorityGrouping(), 4, 0));
+  NVIC_EnableIRQ(BLINK_TIMER_IRQn);
   // SONAR_TIMER
   SONAR_TIMER->PSC = 100 - 1; // 1MHz
   SONAR_TIMER->ARR = 60000 - 1; // 60ms auto-reload
@@ -109,9 +109,9 @@ void EXTI0_IRQHandler(void) {
   }
 }
 
-void TIM3_IRQHandler(void) {
-  if (TIM3->SR & 0b1) {
-    TIM3->SR &= ~0b1; // Clear update interrupt flag
+void TIM1_UP_TIM10_IRQHandler(void) {
+  if (TIM10->SR & 0b1) {
+    TIM10->SR &= ~0b1; // Clear update interrupt flag
     GPIOC->ODR ^= 0b1 << 13;
   }
 }
