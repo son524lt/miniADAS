@@ -35,9 +35,9 @@ static void MX_GPIO_Init(void);
   * @brief  The application entry point.
   * @retval int
   */
-#define setFreq2(f) TIM2->ARR = (uint32_t)(50000/f) - 1;
-
 __IO uint32_t freq = 1;
+__IO DataPacket dataPacket; // Initialize with start and end bytes
+
 
 int main(void)
 {
@@ -55,64 +55,139 @@ int main(void)
   // define pins and ports
   #define LED_PORT GPIOC
   #define LED_PIN 13
-  #define KEY_PORT GPIOA
-  #define KEY_PIN 0
-  #define TRIG_PORT GPIOB
-  #define TRIG_PIN 7
-  #define ECHO_PORT GPIOB
-  #define ECHO_PIN 6
   // define timer
-  #define BLINK_TIMER TIM10
-  #define BLINK_TIMER_IRQn TIM1_UP_TIM10_IRQn
-  #define SONAR_TIMER TIM4
-  #define SONAR_TIMER_IRQn TIM4_IRQn
   // RCC config
-  RCC->AHB1ENR |= 0b111;
-  RCC->APB1ENR |= 0b1111;
-  RCC->APB2ENR |= 0b1 | 0b1 << 5 | 0b101 << 12 | 0b111 << 16;
+  RCC->AHB1ENR |= 0b111;          // Enable GPIOA, GPIOB, GPIOC
+  RCC->AHB1ENR |= 0b1 << 22;      // Enable DMA2
+  RCC->APB1ENR |= 0b1111;         // Enable TIM2, TIM3, TIM4, TIM5
+  RCC->APB2ENR |= 0b1 << 4;       // Enable USART1
+  RCC->APB2ENR |= 0b1 << 16;       // Enable TIM9
   // IO config
-  KEY_PORT->MODER |= 0b0 << 2*KEY_PIN;
-  KEY_PORT->PUPDR |= 0b1 << 2*KEY_PIN;
-  LED_PORT->MODER |= 0b1 << 2*LED_PIN;
-  LED_PORT->OTYPER &= ~(1 << LED_PIN);
-  LED_PORT->ODR |= 1 << LED_PIN;
-  // Enable EXTI0 interrupt
-  SYSCFG->EXTICR[0] |= 0b0000; // PA0
-  EXTI->IMR |= 1 << 0; // Unmask EXTI0
-  EXTI->FTSR |= 1 << 0; // Falling edge trigger
-  NVIC_EnableIRQ(EXTI0_IRQn);
-  // Timer config
-  // TIM2
-  BLINK_TIMER->PSC = 1000 - 1; // 100kHz
-  BLINK_TIMER->ARR = 50000 - 1; // 1Hz 50% PWM
-  BLINK_TIMER->DIER |= 0b1; // Enable update interrupt
-  BLINK_TIMER->CR1 |= 0b1; // Enable timer
-  // BLINK_TIMER->CR1 |= 0b1 << 4; // Downcounting mode
-  NVIC_SetPriority(BLINK_TIMER_IRQn, NVIC_EncodePriority(NVIC_GetPriorityGrouping(), 4, 0));
-  NVIC_EnableIRQ(BLINK_TIMER_IRQn);
-  // SONAR_TIMER
-  SONAR_TIMER->PSC = 100 - 1; // 1MHz
-  SONAR_TIMER->ARR = 60000 - 1; // 60ms auto-reload
-  SONAR_TIMER->CR1 |= 0b1; // Enable timer
-
+  GPIOA->MODER |= 2 << 2*9;       // PA9  alternate function
+  GPIOA->MODER |= 2 << 2*10;      // PA10 alternate function
+  GPIOA->MODER |= 2 << 2*2;       // PA2  alternate function (TIM9 CH1)                                                                                                                                   
+  GPIOA->MODER |= 2 << 2*3;       // PA3  alternate function (TIM9 CH2)
+  LED_PORT->MODER |= 1 << 2*LED_PIN; // Set LED pin to output
+  LED_PORT->OTYPER &= ~(1 << LED_PIN); // Set LED pin to push-pull
+  // AF config
+  GPIOA->AFR[1] = 0;              // Clear AFRH
+  GPIOA->AFR[1] |= 7 << 4;        // PA9 AF7 (USART1 TX)
+  GPIOA->AFR[1] |= 7 << 8;        // PA10 AF7 (USART1 RX)
+  // USART config
+  #define USART1_BAUDRATE 115200
+  #define USART1_CLOCK 100000000  // APB2 clock
+  uint32_t mantissa = USART1_CLOCK / (16 * USART1_BAUDRATE);
+  uint32_t fraction = (uint32_t)((((float)USART1_CLOCK / (16 * USART1_BAUDRATE)) - mantissa) * 16 + 0.5f);
+  USART1->BRR = (mantissa << 4) | (fraction & 0x0F);
+  USART1->CR1 = 0;  // Reset CR1
+  USART1->CR1 |= (1 << 2);        // Enable TX (bit 3)
+  USART1->CR1 |= (1 << 3);        // Enable RX (bit 2)
+  USART1->CR1 |= (1 << 13);       // Enable USART (bit 13)
+  USART1->CR3 = 0;  // Reset CR3
+  USART1->CR3 |= (1 << 7);        // Enable DMA for TX (bit 7)
+  // DMA config for USART1 TX
+  DMA2_Stream7->CR = 0;           // Reset CR and stop DMA2 Stream 7
+  DMA2_Stream7->CR |= 4 << 25;    // Channel 4
+  DMA2_Stream7->CR |= 0b1 << 6;   // Memory-to-peripheral (DIR bit 6)
+  DMA2_Stream7->CR |= 0b1 << 10;  // Enable memory increment
+  DMA2_Stream7->CR |= 0b1 << 4;   // Enable transfer complete interrupt (TCIE)
+  DMA2_Stream7->PAR = (uint32_t)&USART1->DR; // Peripheral address
+  DMA2_Stream7->M0AR = (uint32_t)&dataPacket; // Memory address
+  DMA2_Stream7->NDTR = sizeof(DataPacket); // Number of data items to transfer
+  NVIC_SetPriority(DMA2_Stream7_IRQn, NVIC_EncodePriority(NVIC_GetPriorityGrouping(), 4, 0));
+  NVIC_EnableIRQ(DMA2_Stream7_IRQn); // Enable DMA2 Stream 7 interrupt in NVIC
+  DMA2_Stream7->CR |= 0b1;        // Enable DMA2 Stream
+  // Timer5 config
+  TIM5->PSC = 10000 - 1;          // Prescaler
+  TIM5->ARR = 10000 - 1;          // Auto-reload
+  TIM5->DIER |= 0b1;             // Enable update interrupt
+  TIM5->CR1 |= 0b1;              // Enable timer
+  NVIC_SetPriority(TIM5_IRQn, NVIC_EncodePriority(NVIC_GetPriorityGrouping(), 5, 0));
+  NVIC_EnableIRQ(TIM5_IRQn);      // Enable TIM5 interrupt in NVIC
+  // Timer9 config
+  TIM9->PSC = 100-1;           // Prescaler
+  TIM9->ARR = 10000-1;         // Auto-reload
+  // Program init
+  dataPacket.start_bytes[0] = 0xAF;
+  dataPacket.start_bytes[1] = 0xFA;
+  dataPacket.start_bytes[2] = 0x55;
+  dataPacket.end_bytes[0] = 0x77;
+  dataPacket.end_bytes[1] = 0xAA;
+  dataPacket.steering = 0;
+  dataPacket.user_throttle = 0;
+  dataPacket.true_throttle = 0;
+  dataPacket.brake = 0;
+  dataPacket.speed = 0;
+  dataPacket.PWM1 = 0;
+  dataPacket.PWM2 = 0;
+  dataPacket.distance = 0;
   /* Infinite loop */
   while (1)
   {
   }
 }
-void EXTI0_IRQHandler(void) {
-  if (EXTI->PR & 0b1) {
-    freq++;
-    setFreq2(freq);
-    TIM2->EGR |= 0b1; // Generate update event to apply new ARR value immediately
-    EXTI->PR |= 1 << 0; // Clear pending bit
+
+void sendChar(char c) {
+  while ((USART1->SR & (1 << 7)) == 0); // Wait until TXE (Transmit Data Register Empty) is set
+  USART1->DR=c;
+}
+
+void sendString(const char* str) {
+  while (*str) {
+    sendChar(*str++);
   }
 }
 
-void TIM1_UP_TIM10_IRQHandler(void) {
-  if (TIM10->SR & 0b1) {
-    TIM10->SR &= ~0b1; // Clear update interrupt flag
-    GPIOC->ODR ^= 0b1 << 13;
+void sendPacket() {
+  // Ensure USART has finished transmission before restarting DMA
+  while ((USART1->SR & (1 << 6)) == 0);  // Wait for TC flag (transmission complete)
+  
+  // Disable DMA2 Stream 7
+  DMA2_Stream7->CR &= ~0b1;
+  
+  // Wait for EN bit to be cleared (DMA disabled)
+  while (DMA2_Stream7->CR & 0b1) {}
+  
+  // Clear all flags (DMA2 Stream 7)
+  DMA2->HIFCR |= 0xF5;  // Clear all flags for Stream 7 (bits 27,26,25,24,22,21,20)
+  
+  // Reset NDTR to transfer data again
+  DMA2_Stream7->NDTR = sizeof(DataPacket);
+  
+  // Re-enable DMA2 Stream 7
+  DMA2_Stream7->CR |= 0b1;
+}
+
+void TIM5_IRQHandler(void) {
+  if (TIM5->SR & 0b1) { // Check update interrupt flag
+    LED_PORT->ODR ^= 1 << LED_PIN; // Toggle LED
+    
+    // Update test data
+    dataPacket.steering = 50;
+    dataPacket.user_throttle = 100;
+    dataPacket.true_throttle = 95;
+    dataPacket.brake = 10;
+    dataPacket.speed = 12345;
+    dataPacket.PWM1 = 80;
+    dataPacket.PWM2 = 85;
+    dataPacket.distance = 25;
+    
+    sendPacket();
+    TIM5->SR &= ~0b1; // Clear update interrupt flag
+    }
+}
+
+void DMA2_Stream7_IRQHandler(void) {
+  // Check for transfer complete interrupt flag (bit 27 for Stream 7 in HISR)
+  if ((DMA2->HISR & (1 << 27))) {
+    // Clear the transfer complete flag
+    DMA2->HIFCR |= (1 << 27);
+    // Optional: Add code to handle post-transfer tasks
+  }
+  
+  // Check for error flags and clear them
+  if ((DMA2->HISR & (1 << 25))) {  // Check TE flag
+    DMA2->HIFCR |= (1 << 25);
   }
 }
 

@@ -64,9 +64,24 @@ void Error_Handler(void);
                                                                  0 bit  for subpriority */
 #endif
 
-/* USER CODE BEGIN Private defines */
+void sendChar(char);
+void sendString(const char*);
 
-/* USER CODE END Private defines */
+typedef struct __attribute__((packed)) {
+  uint8_t start_bytes[3];
+  uint8_t steering;
+  uint8_t user_throttle;
+  uint8_t true_throttle;
+  uint8_t brake;
+  int32_t speed;
+  uint8_t PWM1;
+  uint8_t PWM2;
+  uint16_t distance;
+  uint8_t end_bytes[2];
+} DataPacket;
+
+// extern DataPacket dataPacket;
+void sendPacket();
 
 #ifdef __cplusplus
 }
