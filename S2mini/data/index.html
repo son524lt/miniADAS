@@ -1,0 +1,48 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset='UTF-8'>
+  <meta name='viewport' content='width=device-width, initial-scale=1.0'>
+  <title>miniADAS Monitor</title>
+  <link rel='stylesheet' href='style.css'>
+</head>
+<body>
+  <div class='container'>
+    <h1>miniADAS Monitor</h1>
+    
+    <div class='telemetry'>
+      <p id='data'>Loading...</p>
+    </div>
+    
+    <div class='controls'>
+      <label>Sound Velocity (m/s):
+        <input type='number' id='soundVelocity' value='343' min='300' max='400'>
+      </label>
+      <label>Time Window (seconds):
+        <input type='number' id='timeWindow' value='5' min='1' max='100' step='1'>
+      </label>
+    </div>
+    
+    <div class='gauge-container'>
+      <h3>Steering and Speed</h3>
+      <canvas id='steeringGauge' width='400' height='250'></canvas>
+    </div>
+    
+    <div class='charts-container'>
+      <div class='chart-panel'>
+        <h3>Control Input</h3>
+        <canvas id='controlChart' width='800' height='600'></canvas>
+      </div>
+      
+      <div class='chart-panel'>
+        <h3>Distance Sensor</h3>
+        <p id='sonarInfo' style='font-size: 12px; color: #666; margin: 5px 0;'>- us - - cm</p>
+        <canvas id='sonarChart' width='800' height='600'></canvas>
+      </div>
+    </div>
+    
+    <div class='status'>Updates every 100ms</div>
+  </div>
+  <script src='app.js'></script>
+</body>
+</html>
