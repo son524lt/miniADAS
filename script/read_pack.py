@@ -3,7 +3,7 @@ import struct
 
 # ============ CONFIGURATION VARIABLES ============
 COM_PORT = "COM10"
-BAUDRATE = 115200
+BAUDRATE = 921600
 PACKET_START = bytes([0xAF, 0xFA, 0x55])  # 3 bytes start marker
 PACKET_END = bytes([0x77, 0xAA])  # 2 bytes end marker
 SPEED_ENDIAN = '<'  # '<' for little-endian, '>' for big-endian
