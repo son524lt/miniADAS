@@ -82,6 +82,7 @@ typedef struct __attribute__((packed)) {
 
 // extern DataPacket dataPacket;
 void sendPacket();
+void motorWrite(int);
 
 #ifdef __cplusplus
 }
