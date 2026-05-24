@@ -64,6 +64,7 @@ void Error_Handler(void);
                                                                  0 bit  for subpriority */
 #endif
 
+#define uint_map(x, min_in, max_in, min_out, max_out) ((uint32_t)((x - min_in) * (max_out - min_out) / (max_in - min_in) + min_out))
 void sendChar(char);
 void sendString(const char*);
 

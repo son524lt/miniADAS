@@ -35,9 +35,11 @@ static void MX_GPIO_Init(void);
   * @brief  The application entry point.
   * @retval int
   */
+
+#define IRAM_ATTR __attribute__((section("RamFunc")))
 __IO uint32_t freq = 1;
 __IO DataPacket dataPacket; // Initialize with start and end bytes
-
+__IO uint8_t throttle_offset = (~0b0)/2; // Midpoint value for throttle (128 for uint8_t)
 __IO uint32_t counter = 0;
 void SysTick_Handler(void) {
   if (counter>0) {
@@ -65,8 +67,7 @@ int main(void)
   SysTick->LOAD = 100000000 / SysTickFrequency - 1;
   SysTick->VAL = 0; // Clear current value
   SysTick->CTRL = 0b111; // Enable SysTick with processor clock and interrupts
-  // define config
-  #define DATA_INTERVAL_MS 10
+  
   // define pins and ports
   #define LED_PORT GPIOC
   #define LED_PIN 13
@@ -75,25 +76,58 @@ int main(void)
   RCC->AHB1ENR |= 0b1 << 22;      // Enable DMA2
   RCC->APB1ENR |= 0b1111;         // Enable TIM2, TIM3, TIM4, TIM5
   RCC->APB2ENR |= 0b1 << 4;       // Enable USART1
+  RCC->APB2ENR |= 0b1 << 8;       // Enable ADC1
   RCC->APB2ENR |= 0b1 << 16;      // Enable TIM9
   // IO config
   LED_PORT->MODER |= 1 << 2*LED_PIN;    // Set LED pin to output
   LED_PORT->OTYPER &= ~(1 << LED_PIN);  // Set LED pin to push-pull
+  // ADC pins config
+  GPIOA->MODER |= 0b11 << 2*1;
+  GPIOA->MODER |= 0b11 << 2*2;
+  // ADC config
+  ADC1_COMMON->CCR |= 0b11 << 16; // ADC prescaler 8
+  ADC1->CR1 |= 0b10 << 24;     // 12-bit resolution
+  ADC1->CR1 |= 0b1 << 8;        // Enable scan mode
+  ADC1->SMPR2 |= 0b111 << 3*1;   // Sample time 480 cycles for channel 1
+  ADC1->SMPR2 |= 0b111 << 3*2;   // Sample time 480 cycles for channel 2
+  ADC1->SQR1 |= 0b1 << 20;      // 2 conversions in regular sequence
+  ADC1->SQR3 |= 0b1 << 0;       // 1st conversion: channel 1
+  ADC1->SQR3 |= 0b10 << 5;      // 2nd conversion: channel 2
+  ADC1->CR2 |= 0b1 << 1;        // Enable continuous conversion mode
+  ADC1->CR2 |= 0b1  << 8;     // Enable DMA
+  ADC1->CR2 |= 0b1 << 9;        // Enable DMA request
+  // DMA config for ADC1
+  DMA2_Stream0->CR = 0;           // Reset CR and stop DMA2 Stream 0
+  DMA2_Stream0->PAR = (uint32_t)&ADC1->DR; // Peripheral address
+  DMA2_Stream0->M0AR = (uint32_t)&dataPacket.steering; // Memory address
+  DMA2_Stream0->NDTR = 2; // Number of data items to transfer
+  DMA2_Stream0->CR |= 0b1 << 8;   // Enable circular mode
+  DMA2_Stream0->CR |= 0b1 << 10;  // Enable memory increment
+  // DMA2_Stream0->CR &= ~(0b111 << 25);        // Enable DMA2 Stream 0
+  DMA2_Stream0->CR |= 0b1;        // Enable DMA2 Stream 0
+  ADC1->CR2 |= 0b1;        // Enable ADC
+  ADC1->CR2 |= 0b1 << 30;       // Start ADC conversions
   // Alternate function pins config
+  GPIOA->MODER |= 2 << 2*3;       // PA3  alternate function
   GPIOA->MODER |= 2 << 2*6;       // PA6  alternate function
   GPIOA->MODER |= 2 << 2*7;       // PA7  alternate function
   GPIOA->MODER |= 2 << 2*9;       // PA9  alternate function
   GPIOA->MODER |= 2 << 2*10;      // PA10 alternate function
+  GPIOA->MODER |= 2 << 2*15;      // PA15 alternate function
+  GPIOB->MODER |= 2 << 2*3;       // PB3  alternate function
   GPIOB->MODER |= 2 << 2*6;       // PB6  alternate function                                                                                                                                   
   GPIOB->MODER |= 2 << 2*7;       // PB7  alternate function
   // Alternate function config
   GPIOA->AFR[0] = 0;              // Clear GPIOA AFRL
+  GPIOA->AFR[0] |= 2 << 4*3;       // PA3 AF2 (TIM5 CH4) for servo steering control (50Hz PWM)
   GPIOA->AFR[0] |= 2 << 4*6;       // PA6 AF2 (TIM3 CH1)
   GPIOA->AFR[0] |= 2 << 4*7;       // PA7 AF2 (TIM3 CH2)
   GPIOA->AFR[1] = 0;              // Clear GPIOA AFRH
   GPIOA->AFR[1] |= 7 << (9-8)*4;        // PA9 AF7 (USART1 TX)
   GPIOA->AFR[1] |= 7 << (10-8)*4;        // PA10 AF7 (USART1 RX)
+  GPIOA->AFR[1] |= 1 << (15-8)*4;       // PA15 AF1 (TIM2 CH1)
   GPIOB->AFR[0] = 0;              // Clear GPIOB AFRL
+  GPIOB->AFR[0] |= 1 << 4*3;       // PB3 AF1 (TIM2 CH2)
   GPIOB->AFR[0] |= 2 << 4*6;       // PB6 AF2 (TIM4 CH1)
   GPIOB->AFR[0] |= 2 << 4*7;       // PB7 AF2 (TIM4 CH2)
   // USART config
@@ -121,9 +155,13 @@ int main(void)
   // Timer2 config
   TIM2->PSC = 0;          // Prescaler
   TIM2->ARR = ~(uint32_t)0;
+  TIM2->CCMR1 |= 0b1 << 0; // Capture/Compare 1 input capture (CC1S = 01)
+  TIM2->CCMR1 |= 0b1 << 8; // Capture/Compare 2 input capture (CC2S = 01)
+  TIM2->SMCR |= 0b11;
+  TIM2->CR1 |= 0b1;     // Enable TIM2 (CEN bit)
   // Timer3 config (For PWM output to control throttle)
-  TIM3->PSC = 100 - 1;   // Prescaler (Freq = 1 MHz)
-  TIM3->ARR = 1000 - 1; // Auto-reload (Period = 1 ms)
+  TIM3->PSC = 290 - 1;   // Prescaler
+  TIM3->ARR = 256 - 1; // Auto-reload
   TIM3->CCMR1 |= 6 << 4; // Output compare mode: PWM mode 1 (OC1M = 110)
   TIM3->CCER |= 0b1;      // Enable CH1 output (CC1E bit)
   TIM3->CCMR1 |= 6 << 12; // Output compare mode: PWM mode 1 (OC2M = 110)
@@ -147,16 +185,19 @@ int main(void)
   TIM4->CCER |= 0b1 << 4;   // Enable CH2 capture (CC2E bit)
   // TIM4->DIER |= 0b1 << 10;  // Enable trigger interrupt (TIE bit)
   TIM4->DIER |= 0b1 << 2;   // Enable capture/compare 2 interrupt (CC2IE bit)
-  TIM4->DIER |= 0b1 << 0;   // Enable capture/compare 2 interrupt (CC2IE bit)
   TIM4->CR1 |= 0b1;         // Enable TIM4 (CEN bit)
-  // Timer5 config (data sending interval)
-  TIM5->PSC = 100000 - 1;          // Prescaler 1kHz
-  TIM5->ARR = DATA_INTERVAL_MS - 1;          // Auto-reload
+  // Timer5 config (data sending interval at 50Hz and for servo control)
+  TIM5->PSC = 100 - 1;          // Prescaler 1MHz
+  TIM5->ARR = 20000 - 1;          // Auto-reload
   TIM5->DIER |= 0b1;             // Enable update interrupt
+  TIM5->CCMR2 |= 6 << 12;        // Output compare mode: PWM mode 1 (OC4M = 110)
+  // TIM5->CCMR2 |= 0b1 << 14;        // Enable preload for CCR4 (OC4PE bit)
+  TIM5->CCER |= 0b1 << 12;           // Enable CH4 output (CC4E bit)
+  TIM5->CCR4 = 1500;                // Initialize CCR4
   TIM5->CR1 |= 0b1;              // Enable timer
   /// Timer9 config (for calculating sonar sample rate each second)
-  TIM9->PSC = 100000 - 1;          // Prescaler
-  TIM9->ARR = 1000 - 1;          // Auto-reload
+  TIM9->PSC = 10000 - 1;          // Prescaler
+  TIM9->ARR = 10000 - 1;          // Auto-reload
   TIM9->DIER |= 0b1;             // Enable update interrupt
   TIM9->CR1 |= 0b1;              // Enable timer
   // Interrupt config
@@ -174,47 +215,35 @@ int main(void)
   dataPacket.start_bytes[2] = 0x55;
   dataPacket.end_bytes[0] = 0x77;
   dataPacket.end_bytes[1] = 0xAA;
-  dataPacket.steering = (uint8_t)128;
-  dataPacket.user_throttle = (uint8_t)128;
-  dataPacket.true_throttle = (uint8_t)128;
+  dataPacket.steering = (uint8_t)(~0b0)/2;
+  dataPacket.user_throttle = (uint8_t)(~0b0)/2;
+  dataPacket.true_throttle = (uint8_t)(~0b0)/2;
   dataPacket.brake = (uint8_t)0;
   dataPacket.speed = (~0)/2;
   dataPacket.PWM1 = (uint8_t)0;
   dataPacket.PWM2 = (uint8_t)0;
   dataPacket.sample_rate = (uint8_t)0;
   dataPacket.distance = (uint16_t)0;
+  // Joystick calibration
+  counter = 500; // Initial delay of 500 ms before starting main loop
+  uint8_t total_samples = 0;
+  uint32_t total_throttle = 0;
+  while (total_samples < 100) // Wait for initial delay to finish
+  {
+    total_samples++;
+    total_throttle += dataPacket.user_throttle;
+    SysTick_Delay(10); // Delay 10 ms between samples
+  }
+  throttle_offset = total_throttle / 100;
   /* Infinite loop */
+  // volatile uint32_t loopCounter = 1500;
   while (1)
   {
-    // LED_PORT->ODR ^= 1 << LED_PIN; // Toggle LED
-    // SysTick_Delay(500); // Delay 500 ms
+
   }
 }
 
-// void sendChar(char c) {
-//   while ((USART1->SR & (1 << 7)) == 0); // Wait until TXE (Transmit Data Register Empty) is set
-//   USART1->DR=c;
-// }
-
-// void sendString(const char* str) {
-//   while (*str) {
-//     sendChar(*str++);
-//   }
-// }
-
-void motorWrite(int value) {
-  if (value > 1000) value = 1000;
-  if (value < -1000) value = -1000;
-  if (value >= 0) {
-    TIM3->CCR1 = value; // Set duty cycle for CH1
-    TIM3->CCR2 = 0;     // Ensure CH2 is off
-  } else {
-    TIM3->CCR1 = 0;     // Ensure CH1 is off
-    TIM3->CCR2 = -value; // Set duty cycle for CH2 (negative value)
-  }
-}
-
-void sendPacket() {
+IRAM_ATTR void sendPacket() {
   while ((USART1->SR & (1 << 6)) == 0);       // Wait for TC flag (transmission complete)
   DMA2_Stream7->CR &= ~0b1;                   // Disable DMA2 Stream 7
   while (DMA2_Stream7->CR & 0b1);             // Wait for EN bit to be cleared (DMA disabled)
@@ -224,7 +253,7 @@ void sendPacket() {
 }
 
 volatile uint32_t sonar_sample_count = 0;
-void TIM4_IRQHandler(void) {
+IRAM_ATTR void TIM4_IRQHandler(void) {
   if (TIM4->SR & 0b100) { // Check capture/compare 2 interrupt flag
     dataPacket.distance = TIM4->CCR2; // Read captured value
     // LED_PORT->ODR ^= 1 << LED_PIN; // Toggle LED
@@ -233,17 +262,36 @@ void TIM4_IRQHandler(void) {
     TIM4->SR &= ~0b100; // Clear capture/compare 2 interrupt flag
   }
 }
-
-void TIM5_IRQHandler(void) {
+volatile uint32_t prev_cnt=0;
+IRAM_ATTR void TIM5_IRQHandler(void) {
   if (TIM5->SR & 0b1) {
-    // LED_PORT->ODR ^= 1 << LED_PIN; // Toggle LED
+    dataPacket.true_throttle = dataPacket.user_throttle - (throttle_offset - 128);
+    if (dataPacket.true_throttle < 255 && dataPacket.true_throttle > 255 - (throttle_offset - 128)) dataPacket.true_throttle = 0;
+    if (dataPacket.true_throttle > 0 && dataPacket.true_throttle < (throttle_offset - 128)) dataPacket.true_throttle = 255;
+    if (dataPacket.true_throttle > 128) {
+      dataPacket.PWM1 = uint_map(dataPacket.true_throttle, 128, 255, 0, 255);
+      dataPacket.PWM2 = 0;
+    } else if (dataPacket.true_throttle < 128) {
+      dataPacket.PWM1 = 0;
+      dataPacket.PWM2 = uint_map(dataPacket.true_throttle, 128, 0, 0, 255);
+    } else {
+      dataPacket.PWM1 = 0;
+      dataPacket.PWM2 = 0;
+    }
+    TIM5->CCR4 = uint_map(dataPacket.steering, 0, 255, 500, 2500);
+    TIM3->CCR1 = dataPacket.PWM1; // Update PWM duty cycle for CH1
+    TIM3->CCR2 = dataPacket.PWM2; // Update PWM duty cycle for CH2
+    dataPacket.speed = (int)(TIM2->CNT - prev_cnt); // Read speed from TIM2 counter
+    prev_cnt = TIM2->CNT;
     sendPacket();
+
     TIM5->SR &= ~0b1; // Clear update interrupt flag
     }
 }
 
-void TIM1_BRK_TIM9_IRQHandler(void) {
+IRAM_ATTR void TIM1_BRK_TIM9_IRQHandler(void) {
   if (TIM9->SR & 0b1) {
+    LED_PORT->ODR ^= 1 << LED_PIN; // Toggle LED
     dataPacket.sample_rate = sonar_sample_count; // Update sample rate in packet
     sonar_sample_count = 0; // Reset sample count every second
     TIM9->SR &= ~0b1; // Clear update interrupt flag
