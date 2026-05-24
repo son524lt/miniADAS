@@ -117,6 +117,7 @@ int main(void)
   GPIOB->MODER |= 2 << 2*3;       // PB3  alternate function
   GPIOB->MODER |= 2 << 2*6;       // PB6  alternate function                                                                                                                                   
   GPIOB->MODER |= 2 << 2*7;       // PB7  alternate function
+  GPIOB->MODER |= 1 << 2*8;       // PB8  alternate function
   // Alternate function config
   GPIOA->AFR[0] = 0;              // Clear GPIOA AFRL
   GPIOA->AFR[0] |= 2 << 4*3;       // PA3 AF2 (TIM5 CH4) for servo steering control (50Hz PWM)
@@ -130,6 +131,8 @@ int main(void)
   GPIOB->AFR[0] |= 1 << 4*3;       // PB3 AF1 (TIM2 CH2)
   GPIOB->AFR[0] |= 2 << 4*6;       // PB6 AF2 (TIM4 CH1)
   GPIOB->AFR[0] |= 2 << 4*7;       // PB7 AF2 (TIM4 CH2)
+  GPIOB->AFR[1] = 0;              // Clear GPIOB AFRH
+  GPIOB->AFR[1] |= 3 << (8-8)*4;        // PB8 AF3 (TIM10 CH1 for buzzer)
   // USART config
   #define USART1_BAUDRATE 921600
   #define USART1_CLOCK 100000000  // APB2 clock
@@ -200,6 +203,11 @@ int main(void)
   TIM9->ARR = 10000 - 1;          // Auto-reload
   TIM9->DIER |= 0b1;             // Enable update interrupt
   TIM9->CR1 |= 0b1;              // Enable timer
+  // Timer11 for buzzer alert
+  TIM10->PSC = 100000 - 1;          // Prescaler
+  TIM10->ARR = 10000 - 1;          // Auto-reload for beep rate
+  TIM10->DIER |= 0b1;             // Enable update interrupt
+  TIM10->CR1 |= 0b1;              // Enable timer (only enable when alert is needed)
   // Interrupt config
   NVIC_SetPriority(DMA2_Stream7_IRQn, NVIC_EncodePriority(NVIC_GetPriorityGrouping(), 4, 0));
   NVIC_EnableIRQ(DMA2_Stream7_IRQn); // Enable DMA2 Stream 7 interrupt in NVIC
@@ -263,11 +271,33 @@ IRAM_ATTR void TIM4_IRQHandler(void) {
   }
 }
 volatile uint32_t prev_cnt=0;
+volatile uint8_t safety_state = 0; // 0 = safe, 1 = alert, 2 = emergency
 IRAM_ATTR void TIM5_IRQHandler(void) {
   if (TIM5->SR & 0b1) {
+    if (dataPacket.distance < 3000) {
+      safety_state = 2; // Emergency
+      // TIM10->ARR = 10 - 1;
+    } else if (dataPacket.distance < 6000) {
+      // TIM10->ARR = 20 - 1;
+      safety_state = 1;
+    } else {
+      safety_state = 0; // Safe
+      // TIM10->CR1 &= ~0b1; // Disable buzzer
+    }
     dataPacket.true_throttle = dataPacket.user_throttle - (throttle_offset - 128);
-    if (dataPacket.true_throttle < 255 && dataPacket.true_throttle > 255 - (throttle_offset - 128)) dataPacket.true_throttle = 0;
-    if (dataPacket.true_throttle > 0 && dataPacket.true_throttle < (throttle_offset - 128)) dataPacket.true_throttle = 255;
+    if (safety_state == 2) {
+      dataPacket.brake = 255; // Full brake in emergency
+      dataPacket.true_throttle = 128; // No throttle in emergency
+    }
+    else if (safety_state == 1) {
+      // dataPacket.brake = uint_map(6000 - dataPacket.distance, 0, 3000, 0, 255); // Scaled brake in alert
+      dataPacket.true_throttle = 128; // No throttle in alert
+    }
+    else {
+      dataPacket.brake = 0; // No brake in safe state
+      if (dataPacket.true_throttle < 255 && dataPacket.true_throttle > 255 - (throttle_offset - 128)) dataPacket.true_throttle = 0;
+      if (dataPacket.true_throttle > 0 && dataPacket.true_throttle < (throttle_offset - 128)) dataPacket.true_throttle = 255;
+    }
     if (dataPacket.true_throttle > 128) {
       dataPacket.PWM1 = uint_map(dataPacket.true_throttle, 128, 255, 0, 255);
       dataPacket.PWM2 = 0;
@@ -277,6 +307,10 @@ IRAM_ATTR void TIM5_IRQHandler(void) {
     } else {
       dataPacket.PWM1 = 0;
       dataPacket.PWM2 = 0;
+    }
+    if (dataPacket.brake > 0) {
+      dataPacket.PWM1 = dataPacket.brake;
+      dataPacket.PWM2 = dataPacket.brake;
     }
     TIM5->CCR4 = uint_map(dataPacket.steering, 0, 255, 500, 2500);
     TIM3->CCR1 = dataPacket.PWM1; // Update PWM duty cycle for CH1
