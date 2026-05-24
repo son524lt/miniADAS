@@ -24,7 +24,7 @@ document.getElementById('timeWindow').addEventListener('change', (e) => {
 
 // Map functions
 function mapSteering(val) {
-  return ((val / 255) * 120) - 60; // 0-255 -> -60 to 60
+  return Math.floor(((val / 255) * 120) - 60); // 0-255 -> -60 to 60
 }
 
 function mapThrottle(val) {
@@ -40,39 +40,65 @@ function mapPWM(val) {
 }
 
 function updateData() {
+  // P6: Fetch binary protocol (12 bytes)
   fetch('/api/data')
-    .then(r => r.json())
-    .then(d => {
+    .then(r => r.arrayBuffer())
+    .then(buffer => {
+      // Debug: Log received bytes
+      const bytes = new Uint8Array(buffer);
+      console.log(`Binary length: ${bytes.length}, bytes:`, Array.from(bytes).map(b => '0x' + b.toString(16).padStart(2, '0')).join(' '));
+      
+      // Check buffer size
+      if (bytes.length < 13) {
+        console.error(`ERROR: Buffer too small! Got ${bytes.length} bytes, expected 13`);
+        return;
+      }
+      
+      const view = new DataView(buffer);
+      
+      // Parse binary format: st(1) + ut(1) + tt(1) + br(1) + sp(4 LE) + p1(1) + p2(1) + di(2 LE) + spr(1)
+      const steering = view.getUint8(0);
+      const userThrottle = view.getUint8(1);
+      const trueThrottle = view.getUint8(2);
+      const brake = view.getUint8(3);
+      const speed = view.getInt32(4, true);  // Little endian
+      const pwm1 = view.getUint8(8);
+      const pwm2 = view.getUint8(9);
+      const sampleRate = view.getUint8(10); // Sample rate in Hz (not used in this version)
+      const distance = view.getUint16(11, true);  // Little endian
+      
+      console.log(`Parsed: st=${steering}, ut=${userThrottle}, tt=${trueThrottle}, br=${brake}, sp=${speed}, p1=${pwm1}, p2=${pwm2}, di=${distance}, spr=${sampleRate}`);
+      
       const now = Date.now();
       const elapsedTime = (now - startTime) / 1000;
       
       // Map values
-      const steeringDeg = mapSteering(d.st);
-      const throttleUser = mapThrottle(d.ut);
-      const throttleTrue = mapThrottle(d.tt);
-      const brakePercent = mapBrake(d.br);
-      const pwm1Percent = mapPWM(d.p1);
-      const pwm2Percent = mapPWM(d.p2);
+      const steeringDeg = mapSteering(steering);
+      const throttleUser = mapThrottle(userThrottle);
+      const throttleTrue = mapThrottle(trueThrottle);
+      const brakePercent = mapBrake(brake);
+      const pwm1Percent = mapPWM(pwm1);
+      const pwm2Percent = mapPWM(pwm2);
       
       // Store current steering for gauge
       currentSteering = steeringDeg;
-      currentSpeed = d.sp; // Store current speed for bar
+      currentSpeed = speed; // Store current speed for bar
       
       // Check if out of range
-      const isOutOfRange = d.di > MAX_ECHO_TIME;
+      const isOutOfRange = distance > MAX_ECHO_TIME;
       const distanceDisplay = isOutOfRange ? 'Unknown' : 
-        (d.di * soundVelocity / 2 / 1000000 * 100).toFixed(1) + 'cm';
+        (distance * soundVelocity / 2 / 1000000 * 100).toFixed(1) + 'cm';
       
       // Update sonar info display
-      const distanceValue = (d.di * soundVelocity / 2 / 1000000 * 100).toFixed(1);
+      const distanceValue = (distance * soundVelocity / 2 / 1000000 * 100).toFixed(1);
       document.getElementById('sonarInfo').textContent = 
-        `${d.di} us - ${distanceValue} cm`;
+        `${distance} us - ${distanceValue} cm`;
       
       // Store data point
       dataPoints.push({
         time: elapsedTime,
-        echoTime: Math.min(d.di, MAX_ECHO_TIME),
-        distance: d.di * soundVelocity / 2 / 1000000 * 100,
+        echoTime: Math.min(distance, MAX_ECHO_TIME),
+        distance: distance * soundVelocity / 2 / 1000000 * 100,
         isOutOfRange: isOutOfRange,
         throttleUser: throttleUser,
         throttleTrue: throttleTrue,
@@ -84,7 +110,7 @@ function updateData() {
       
       // Update telemetry
       document.getElementById('data').textContent = 
-        `ST: ${steeringDeg.toFixed(1)}deg | UT: ${throttleUser.toFixed(0)}% | TT: ${throttleTrue.toFixed(0)}% | BR: ${brakePercent.toFixed(0)}% | SP: ${d.sp}km/h | P1: ${pwm1Percent.toFixed(0)}% | P2: ${pwm2Percent.toFixed(0)}% | DI: ${d.di}us (${distanceDisplay})`;
+        `ST: ${steeringDeg.toFixed(1)}deg | UT: ${throttleUser.toFixed(0)}% | TT: ${throttleTrue.toFixed(0)}% | BR: ${brakePercent.toFixed(0)}% | SP: ${speed}km/h | P1: ${pwm1Percent.toFixed(0)}% | P2: ${pwm2Percent.toFixed(0)}% | DI: ${distance}us (${distanceDisplay}) | Sample Rate: ${sampleRate}Hz`;
       
       // Draw charts
       drawSteeringGauge();
@@ -92,7 +118,7 @@ function updateData() {
       drawControlChart();
       drawSonarChart();
     })
-    .catch(e => console.error(e));
+    .catch(e => console.error('Fetch/Parse error:', e));
 }
 
 // Steering Gauge (horizontal bar)

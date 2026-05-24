@@ -2,6 +2,7 @@
 #include <WiFi.h>
 #include <WebServer.h>
 #include <LittleFS.h>
+#include "driver/uart.h"
 
 // ============ CONFIGURATION ============
 #define SERIAL_BAUDRATE 921600
@@ -10,8 +11,8 @@
 #define PACKET_START_BYTE3 0x55
 #define PACKET_END_BYTE1 0x77
 #define PACKET_END_BYTE2 0xAA
-#define PACKET_DATA_LENGTH 12
-#define PACKET_TOTAL_LENGTH (3 + PACKET_DATA_LENGTH + 2)  // start + data + end
+#define PACKET_DATA_LENGTH 14  // steering(1) + ut(1) + tt(1) + br(1) + speed(4) + PWM1(1) + PWM2(1) + distance(2) + sample_rate(1)
+#define PACKET_TOTAL_LENGTH 18  // start(3) + data(14) + end(2) = 18 bytes
 
 // ============ WiFi CONFIG ============
 #define WIFI_SSID "miniADAS"
@@ -30,6 +31,7 @@ struct DataPacket {
   int32_t speed;
   uint8_t PWM1;
   uint8_t PWM2;
+  uint8_t sample_rate;
   uint16_t distance;
 };
 
@@ -39,133 +41,188 @@ WebServer server(80);
 // Current data packet (updated in parseAndPrintPacket)
 DataPacket currentPacket = {0};
 
-// Packet buffer and state
+// File caches (P3: Cache files in RAM)
+String indexHtml;
+String styleCss;
+String appJs;
+
+// DMA + Ring buffer for UART1 RX
+#define UART_RX_BUF_SIZE 1024
+#define UART_TX_BUF_SIZE 256
+uint8_t uartRxBuffer[UART_RX_BUF_SIZE];
+
+// Packet buffer for parsing
 uint8_t packetBuffer[PACKET_TOTAL_LENGTH];
 uint8_t bufferIndex = 0;
 bool receivingPacket = false;
 
-void parseAndPrintPacket(uint8_t* data) {
-  DataPacket packet;
-  packet.steering = data[0];
-  packet.user_throttle = data[1];
-  packet.true_throttle = data[2];
-  packet.brake = data[3];
-  // Little-endian parsing for speed (int32_t)
-  packet.speed = (int32_t)((data[4]) | (data[5] << 8) | (data[6] << 16) | ((int32_t)data[7] << 24));
-  packet.PWM1 = data[8];
-  packet.PWM2 = data[9];
-  // Little-endian parsing for distance (uint16_t)
-  packet.distance = (uint16_t)((data[10]) | (data[11] << 8));
+// Event queue for UART events
+QueueHandle_t uartEventQueue;
+
+// WiFi event counter
+int wifiClientCount = 0;
+int httpRequestCount = 0;
+
+// P5: UART DMA Event Handler - parse packet from DMA buffer
+static void IRAM_ATTR uartEventTask(void *pvParameters) {
+  uart_event_t event;
+  uint8_t dtmp[256];  // Temporary buffer for reading
   
-  // Store to global currentPacket
-  currentPacket = packet;
-  
-  // Print in format: st: 001, ut: 000, tt: 000, br: 000, sp: 12345, p1: 080, p2: 085, di: 00025 (us)
-  Serial.printf("st: %03d, ut: %03d, tt: %03d, br: %03d, sp: %ld, p1: %03d, p2: %03d, di: %05d(us)\n",
-    packet.steering, packet.user_throttle, packet.true_throttle, packet.brake,
-    packet.speed, packet.PWM1, packet.PWM2, packet.distance);
-}
-
-// ===== HTTP HANDLERS =====
-void handleRoot() {
-  File file = LittleFS.open("/index.html", "r");
-  if (!file) {
-    server.send(404, "text/plain", "404: index.html not found");
-    return;
-  }
-  server.streamFile(file, "text/html; charset=utf-8");
-  file.close();
-}
-
-void handleCSS() {
-  File file = LittleFS.open("/style.css", "r");
-  if (!file) {
-    server.send(404, "text/plain", "404: style.css not found");
-    return;
-  }
-  server.streamFile(file, "text/css");
-  file.close();
-}
-
-void handleJS() {
-  File file = LittleFS.open("/app.js", "r");
-  if (!file) {
-    server.send(404, "text/plain", "404: app.js not found");
-    return;
-  }
-  server.streamFile(file, "application/javascript");
-  file.close();
-}
-
-void handleAPI() {
-  // Compact JSON format
-  String json = "{\"st\":";
-  json += currentPacket.steering;
-  json += ",\"ut\":";
-  json += (currentPacket.user_throttle * 100 / 255);
-  json += ",\"tt\":";
-  json += (currentPacket.true_throttle * 100 / 255);
-  json += ",\"br\":";
-  json += (currentPacket.brake * 100 / 255);
-  json += ",\"sp\":";
-  json += (currentPacket.speed / 100);
-  json += ",\"p1\":";
-  json += currentPacket.PWM1;
-  json += ",\"p2\":";
-  json += currentPacket.PWM2;
-  json += ",\"di\":";
-  json += currentPacket.distance;
-  json += "}";
-  
-  server.send(200, "application/json", json);
-}
-
-void onSerialReceive() {
-  while (Serial1.available()) {
-    uint8_t byte = Serial1.read();
-    
-    if (!receivingPacket) {
-      // Look for start marker byte 1
-      if (byte == PACKET_START_BYTE1) {
-        bufferIndex = 0;
-        receivingPacket = true;
-        packetBuffer[bufferIndex++] = byte;
-      }
-    } else {
-      packetBuffer[bufferIndex++] = byte;
-      
-      // Verify start marker (3 bytes)
-      if (bufferIndex == 3) {
-        if (packetBuffer[1] != PACKET_START_BYTE2 || packetBuffer[2] != PACKET_START_BYTE3) {
-          // Invalid start marker, reset and rescan
-          receivingPacket = false;
-          bufferIndex = 0;
-        }
-      }
-      // Check if we have complete packet (start + data + end)
-      else if (bufferIndex == PACKET_TOTAL_LENGTH) {
-        // Verify end marker
-        if (packetBuffer[3 + PACKET_DATA_LENGTH] == PACKET_END_BYTE1 &&
-            packetBuffer[3 + PACKET_DATA_LENGTH + 1] == PACKET_END_BYTE2) {
-          // Valid packet, parse and print
-          parseAndPrintPacket(&packetBuffer[3]);
-        }
-        // Reset for next packet
-        receivingPacket = false;
-        bufferIndex = 0;
+  while (1) {
+    // Wait for UART event from queue
+    if (xQueueReceive(uartEventQueue, (void *)&event, (TickType_t)portMAX_DELAY)) {
+      switch (event.type) {
+        case UART_DATA:
+          // RX data available - read from DMA buffer
+          {
+            int len = uart_read_bytes(UART_NUM_1, dtmp, event.size, 0);
+            
+            // Parse packet for Web API
+            for (int i = 0; i < len; i++) {
+              uint8_t byte = dtmp[i];
+              
+              if (!receivingPacket) {
+                if (byte == PACKET_START_BYTE1) {
+                  bufferIndex = 0;
+                  receivingPacket = true;
+                  packetBuffer[bufferIndex++] = byte;
+                }
+              } else {
+                if (bufferIndex < PACKET_TOTAL_LENGTH) {
+                  packetBuffer[bufferIndex++] = byte;
+                }
+                
+                // Verify start marker at byte 3
+                if (bufferIndex == 3) {
+                  if (packetBuffer[1] != PACKET_START_BYTE2 || packetBuffer[2] != PACKET_START_BYTE3) {
+                    receivingPacket = false;
+                    bufferIndex = 0;
+                  }
+                }
+                // Check complete packet
+                else if (bufferIndex == PACKET_TOTAL_LENGTH) {
+                  if (packetBuffer[16] == PACKET_END_BYTE1 && packetBuffer[17] == PACKET_END_BYTE2) {
+                    // Valid packet - extract and update currentPacket
+                    uint8_t* data = &packetBuffer[3];
+                    currentPacket.steering = data[0];
+                    currentPacket.user_throttle = data[1];
+                    currentPacket.true_throttle = data[2];
+                    currentPacket.brake = data[3];
+                    currentPacket.speed = (int32_t)((data[4]) | (data[5] << 8) | (data[6] << 16) | ((int32_t)data[7] << 24));
+                    currentPacket.PWM1 = data[8];
+                    currentPacket.PWM2 = data[9];
+                    currentPacket.distance = (uint16_t)((data[10]) | (data[11] << 8));
+                    currentPacket.sample_rate = data[12];
+                  }
+                  receivingPacket = false;
+                  bufferIndex = 0;
+                }
+              }
+            }
+          }
+          break;
+        
+        case UART_FIFO_OVF:
+          Serial.println("[WARN] UART FIFO overflow");
+          uart_flush_input(UART_NUM_1);
+          break;
+        
+        case UART_BUFFER_FULL:
+          Serial.println("[WARN] UART RX buffer full");
+          uart_flush_input(UART_NUM_1);
+          break;
+        
+        default:
+          break;
       }
     }
   }
 }
 
+// P3: Cache files in RAM - optimized file serving
+void IRAM_ATTR handleRoot() {
+  httpRequestCount++;
+  Serial.printf("[HTTP #%d] GET / from %s\n", httpRequestCount, server.client().remoteIP().toString().c_str());
+  if (indexHtml.length() > 0) {
+    server.send(200, "text/html; charset=utf-8", indexHtml);
+  } else {
+    server.send(404, "text/plain", "404: index.html not found");
+  }
+}
+
+void IRAM_ATTR handleCSS() {
+  httpRequestCount++;
+  Serial.printf("[HTTP #%d] GET /style.css\n", httpRequestCount);
+  if (styleCss.length() > 0) {
+    server.send(200, "text/css", styleCss);
+  } else {
+    server.send(404, "text/plain", "404: style.css not found");
+  }
+}
+
+void IRAM_ATTR handleJS() {
+  httpRequestCount++;
+  Serial.printf("[HTTP #%d] GET /app.js\n", httpRequestCount);
+  if (appJs.length() > 0) {
+    server.send(200, "application/javascript", appJs);
+  } else {
+    server.send(404, "text/plain", "404: app.js not found");
+  }
+}
+
+void IRAM_ATTR handleAPI() {
+  httpRequestCount++;
+  Serial.printf("[HTTP #%d] GET /api/data\n", httpRequestCount);
+  
+  // P6: Binary protocol (13 bytes) - 75% smaller than JSON
+  // Format: steering(1) + user_throttle(1) + true_throttle(1) + brake(1) + speed(4 LE) + PWM1(1) + PWM2(1) + distance(2 LE) + sample_rate(1)
+  uint8_t binData[13];
+  binData[0] = currentPacket.steering;
+  binData[1] = currentPacket.user_throttle;
+  binData[2] = currentPacket.true_throttle;
+  binData[3] = currentPacket.brake;
+  // speed (int32_t, little endian)
+  binData[4] = (currentPacket.speed >> 0) & 0xFF;
+  binData[5] = (currentPacket.speed >> 8) & 0xFF;
+  binData[6] = (currentPacket.speed >> 16) & 0xFF;
+  binData[7] = (currentPacket.speed >> 24) & 0xFF;
+  binData[8] = currentPacket.PWM1;
+  binData[9] = currentPacket.PWM2;
+  binData[10] = currentPacket.sample_rate;
+  // distance (uint16_t, little endian)
+  binData[11] = (currentPacket.distance >> 0) & 0xFF;
+  binData[12] = (currentPacket.distance >> 8) & 0xFF;
+  
+  // Send binary response using WebServer (handles HTTP headers automatically)
+  server.sendHeader("Content-Type", "application/octet-stream");
+  server.send(200, "application/octet-stream", String((const char*)binData, 13));
+}
+
 void setup() {
+  // Init USB CDC (Serial) for logging only
   Serial.begin(115200);
-  Serial1.begin(SERIAL_BAUDRATE, SERIAL_8N1, 5, 7);
+  delay(500);
+  Serial.println("\n=== S2mini WiFi WebServer (UART DMA) ===");
   
-  // Set interrupt handler for Serial1 receive
-  Serial1.onReceive(onSerialReceive);
+  // P5: UART DMA Setup using esp-idf
+  // Install UART1 driver with DMA enabled
+  uart_driver_install(UART_NUM_1, UART_RX_BUF_SIZE, UART_TX_BUF_SIZE, 10, &uartEventQueue, 0);
   
-  Serial.println("\n=== S2mini WiFi WebServer ===");
+  // Configure UART1
+  uart_config_t uart1_config = {
+    .baud_rate = SERIAL_BAUDRATE,
+    .data_bits = UART_DATA_8_BITS,
+    .parity = UART_PARITY_DISABLE,
+    .stop_bits = UART_STOP_BITS_1,
+    .flow_ctrl = UART_HW_FLOWCTRL_DISABLE,
+    .rx_flow_ctrl_thresh = 122,
+  };
+  uart_param_config(UART_NUM_1, &uart1_config);
+  uart_set_pin(UART_NUM_1, 7, 5, UART_PIN_NO_CHANGE, UART_PIN_NO_CHANGE);
+  uart_enable_rx_intr(UART_NUM_1);  // Enable RX interrupt with DMA
+  
+  // Create task for UART event handling
+  xTaskCreate(uartEventTask, "uart_event_task", 2048, NULL, 12, NULL);
   
   // Mount LittleFS
   if (!LittleFS.begin()) {
@@ -173,21 +230,6 @@ void setup() {
     delay(2000);
   } else {
     Serial.println("[OK] LittleFS mounted");
-    
-    // List files in LittleFS
-    Serial.println("[INFO] Files in LittleFS:");
-    File root = LittleFS.open("/");
-    File file = root.openNextFile();
-    while (file) {
-      Serial.print("  - ");
-      Serial.print(file.name());
-      Serial.print(" (");
-      Serial.print(file.size());
-      Serial.println(" bytes)");
-      file = root.openNextFile();
-    }
-    
-    // Check if index.html exists
     if (LittleFS.exists("/index.html")) {
       Serial.println("[OK] index.html found!");
     } else {
@@ -202,11 +244,7 @@ void setup() {
   IPAddress subnet(WIFI_SUBNET);
   WiFi.softAPConfig(local_ip, gateway, subnet);
   WiFi.softAP(WIFI_SSID, WIFI_PASSWORD);
-  
-  Serial.print("[OK] WiFi AP SSID: ");
-  Serial.println(WIFI_SSID);
-  Serial.print("[OK] WiFi AP IP: ");
-  Serial.println(local_ip);
+  Serial.println("[OK] WiFi AP started on 192.168.1.1");
   
   // Setup HTTP routes
   server.on("/", handleRoot);
@@ -214,13 +252,45 @@ void setup() {
   server.on("/app.js", handleJS);
   server.on("/api/data", handleAPI);
   
+  // P3: Pre-load files into RAM
+  File f = LittleFS.open("/index.html", "r");
+  if (f) indexHtml = f.readString();
+  f.close();
+  
+  f = LittleFS.open("/style.css", "r");
+  if (f) styleCss = f.readString();
+  f.close();
+  
+  f = LittleFS.open("/app.js", "r");
+  if (f) appJs = f.readString();
+  f.close();
+  
   // Start WebServer
   server.begin();
-  Serial.println("[OK] WebServer started on http://192.168.1.1");
-  Serial.println("S2mini started, waiting for packets...");
+  Serial.println("[OK] WebServer started");
+  
+  // WiFi AP event logging
+  WiFi.onEvent([](WiFiEvent_t event) {
+    switch(event) {
+      case ARDUINO_EVENT_WIFI_AP_STACONNECTED:
+        wifiClientCount++;
+        Serial.printf("[WiFi] Client connected (Total: %d)\n", wifiClientCount);
+        break;
+      case ARDUINO_EVENT_WIFI_AP_STADISCONNECTED:
+        if (wifiClientCount > 0) wifiClientCount--;
+        Serial.printf("[WiFi] Client disconnected (Total: %d)\n", wifiClientCount);
+        break;
+      default:
+        break;
+    }
+  });
 }
 
 void loop() {
+  // P5: DMA + FIFO + ISR handles all UART forwarding automatically
+  // Main loop only handles HTTP requests
   server.handleClient();
-  delay(10);
+  
+  // P1: 50ms delay (matches 50ms UART packet cycle)
+  delay(50);
 }
