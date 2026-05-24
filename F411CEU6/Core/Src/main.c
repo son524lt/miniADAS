@@ -65,6 +65,8 @@ int main(void)
   SysTick->LOAD = 100000000 / SysTickFrequency - 1;
   SysTick->VAL = 0; // Clear current value
   SysTick->CTRL = 0b111; // Enable SysTick with processor clock and interrupts
+  // define config
+  #define DATA_INTERVAL_MS 10
   // define pins and ports
   #define LED_PORT GPIOC
   #define LED_PIN 13
@@ -73,6 +75,7 @@ int main(void)
   RCC->AHB1ENR |= 0b1 << 22;      // Enable DMA2
   RCC->APB1ENR |= 0b1111;         // Enable TIM2, TIM3, TIM4, TIM5
   RCC->APB2ENR |= 0b1 << 4;       // Enable USART1
+  RCC->APB2ENR |= 0b1 << 16;      // Enable TIM9
   // IO config
   LED_PORT->MODER |= 1 << 2*LED_PIN;    // Set LED pin to output
   LED_PORT->OTYPER &= ~(1 << LED_PIN);  // Set LED pin to push-pull
@@ -133,9 +136,8 @@ int main(void)
   TIM4->ARR = 50000-1;          // Auto-reload
   // config for trig:
   TIM4->CCMR1 &= 0xffff;        // Clear CCMR1
-  TIM4->CCR1 = 50000-100-1; // Capture/Compare register 1 (10 us before ARR)
-  // TIM4->CCR1 = 50000-10000-1; // Capture/Compare register 1 (10 ms before ARR)
-  TIM4->CCMR1 |= 6 << 4;   // Output compare mode: toggle on match (OC1M = 110)   
+  TIM4->CCR1 = 50000-10-1; // Capture/Compare register 1 (10 us before ARR)
+  TIM4->CCMR1 |= 7 << 4;   // Output compare mode: PWM mode 2 (OC1M = 111 - HIGH when CNT > CCR)
   TIM4->CCER |= 0b1;        // Enable CH1 output (CC1E bit)
   // config for echo:
   TIM4->CCMR1 |= 0b1 << 8;   // Input capture on CH2 (TI2)
@@ -147,14 +149,15 @@ int main(void)
   TIM4->DIER |= 0b1 << 2;   // Enable capture/compare 2 interrupt (CC2IE bit)
   TIM4->DIER |= 0b1 << 0;   // Enable capture/compare 2 interrupt (CC2IE bit)
   TIM4->CR1 |= 0b1;         // Enable TIM4 (CEN bit)
-  // Timer5 config
+  // Timer5 config (data sending interval)
   TIM5->PSC = 100000 - 1;          // Prescaler 1kHz
-  TIM5->ARR = 50 - 1;          // Auto-reload
+  TIM5->ARR = DATA_INTERVAL_MS - 1;          // Auto-reload
   TIM5->DIER |= 0b1;             // Enable update interrupt
   TIM5->CR1 |= 0b1;              // Enable timer
   /// Timer9 config (for calculating sonar sample rate each second)
-  TIM9->PSC = 10000 - 1;          // Prescaler
+  TIM9->PSC = 100000 - 1;          // Prescaler
   TIM9->ARR = 1000 - 1;          // Auto-reload
+  TIM9->DIER |= 0b1;             // Enable update interrupt
   TIM9->CR1 |= 0b1;              // Enable timer
   // Interrupt config
   NVIC_SetPriority(DMA2_Stream7_IRQn, NVIC_EncodePriority(NVIC_GetPriorityGrouping(), 4, 0));
@@ -163,20 +166,23 @@ int main(void)
   NVIC_EnableIRQ(TIM4_IRQn);      // Enable TIM4 interrupt
   NVIC_SetPriority(TIM5_IRQn, NVIC_EncodePriority(NVIC_GetPriorityGrouping(), 5, 0));
   NVIC_EnableIRQ(TIM5_IRQn);      // Enable TIM5 interrupt
+  NVIC_SetPriority(TIM1_BRK_TIM9_IRQn, NVIC_EncodePriority(NVIC_GetPriorityGrouping(), 5, 0));
+  NVIC_EnableIRQ(TIM1_BRK_TIM9_IRQn);      // Enable TIM9 interrupt
   // Program init
   dataPacket.start_bytes[0] = 0xAF;
   dataPacket.start_bytes[1] = 0xFA;
   dataPacket.start_bytes[2] = 0x55;
   dataPacket.end_bytes[0] = 0x77;
   dataPacket.end_bytes[1] = 0xAA;
-  dataPacket.steering = 0;
-  dataPacket.user_throttle = 0;
-  dataPacket.true_throttle = 0;
-  dataPacket.brake = 0;
-  dataPacket.speed = 0;
-  dataPacket.PWM1 = 0;
-  dataPacket.PWM2 = 0;
-  dataPacket.distance = 0;
+  dataPacket.steering = (uint8_t)128;
+  dataPacket.user_throttle = (uint8_t)128;
+  dataPacket.true_throttle = (uint8_t)128;
+  dataPacket.brake = (uint8_t)0;
+  dataPacket.speed = (~0)/2;
+  dataPacket.PWM1 = (uint8_t)0;
+  dataPacket.PWM2 = (uint8_t)0;
+  dataPacket.sample_rate = (uint8_t)0;
+  dataPacket.distance = (uint16_t)0;
   /* Infinite loop */
   while (1)
   {
@@ -217,10 +223,13 @@ void sendPacket() {
   DMA2_Stream7->CR |= 0b1;                    // Re-enable DMA2 Stream 7
 }
 
+volatile uint32_t sonar_sample_count = 0;
 void TIM4_IRQHandler(void) {
   if (TIM4->SR & 0b100) { // Check capture/compare 2 interrupt flag
     dataPacket.distance = TIM4->CCR2; // Read captured value
-    LED_PORT->ODR ^= 1 << LED_PIN; // Toggle LED
+    // LED_PORT->ODR ^= 1 << LED_PIN; // Toggle LED
+    sonar_sample_count++; // Increment sample count
+    TIM4->CNT = 49000;
     TIM4->SR &= ~0b100; // Clear capture/compare 2 interrupt flag
   }
 }
@@ -233,9 +242,9 @@ void TIM5_IRQHandler(void) {
     }
 }
 
-uint32_t sonar_sample_count = 0;
-void TIM9_IRQHandler(void) {
+void TIM1_BRK_TIM9_IRQHandler(void) {
   if (TIM9->SR & 0b1) {
+    dataPacket.sample_rate = sonar_sample_count; // Update sample rate in packet
     sonar_sample_count = 0; // Reset sample count every second
     TIM9->SR &= ~0b1; // Clear update interrupt flag
     }

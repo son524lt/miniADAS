@@ -77,6 +77,7 @@ typedef struct __attribute__((packed)) {
   uint8_t PWM1;
   uint8_t PWM2;
   uint16_t distance;
+  uint8_t sample_rate;
   uint8_t end_bytes[2];
 } DataPacket;
 
