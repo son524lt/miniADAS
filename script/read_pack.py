@@ -18,7 +18,9 @@ SPEED_ENDIAN = '<'  # '<' for little-endian, '>' for big-endian
 # uint8_t PWM1           - byte 8
 # uint8_t PWM2           - byte 9
 # uint16_t distance      - bytes 10-11 (little-endian)
-# Total: 12 bytes of data
+# uint8_t sample_rate    - byte 12
+# Total: 13 bytes of data
+# Total packet size: 3 (start) + 13 (data) + 2 (end) = 18 bytes
 
 # Field name abbreviations (2 characters)
 FIELD_NAMES = {
@@ -29,7 +31,8 @@ FIELD_NAMES = {
     'speed': 'sp',
     'PWM1': 'p1',
     'PWM2': 'p2',
-    'distance': 'di'
+    'distance': 'di',
+    'sample_rate': 'sr'
 }
 
 
@@ -55,9 +58,9 @@ def read_serial_data():
                 if not byte3 or byte3[0] != PACKET_START[2]:
                     continue
                 
-                # Found valid start, read 12 bytes of data
-                data_bytes = ser.read(12)
-                if len(data_bytes) < 12:
+                # Found valid start, read 13 bytes of data
+                data_bytes = ser.read(13)
+                if len(data_bytes) < 13:
                     continue
                 
                 # Read 2 bytes end marker
@@ -80,6 +83,7 @@ def read_serial_data():
                 pwm2 = data_bytes[9]
                 # distance: 2 bytes as uint16_t (little-endian)
                 distance = struct.unpack(f'{SPEED_ENDIAN}H', data_bytes[10:12])[0]
+                sample_rate = data_bytes[12]
                 
                 # Format and print output
                 output = (
@@ -90,7 +94,8 @@ def read_serial_data():
                     f"{FIELD_NAMES['speed']}: {speed}, "
                     f"{FIELD_NAMES['PWM1']}: {pwm1:03d}, "
                     f"{FIELD_NAMES['PWM2']}: {pwm2:03d}, "
-                    f"{FIELD_NAMES['distance']}: {distance:05d}"
+                    f"{FIELD_NAMES['distance']}: {distance:05d}, "
+                    f"{FIELD_NAMES['sample_rate']}: {sample_rate:03d}"
                 )
                 print(output)
             
