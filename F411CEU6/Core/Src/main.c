@@ -333,15 +333,11 @@ IRAM_ATTR void TIM1_BRK_TIM9_IRQHandler(void) {
 }
 
 void DMA2_Stream7_IRQHandler(void) {
-  // Check for transfer complete interrupt flag (bit 27 for Stream 7 in HISR)
+  // Transfer complete flag
   if ((DMA2->HISR & (1 << 27))) {
-    // Clear the transfer complete flag
     DMA2->HIFCR |= (1 << 27);
-    // Optional: Add code to handle post-transfer tasks
   }
-  
-  // Check for error flags and clear them
-  if ((DMA2->HISR & (1 << 25))) {  // Check TE flag
+  if ((DMA2->HISR & (1 << 25))) {
     DMA2->HIFCR |= (1 << 25);
   }
 }
