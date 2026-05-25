@@ -233,7 +233,7 @@ int main(void)
   dataPacket.sample_rate = (uint8_t)0;
   dataPacket.distance = (uint16_t)0;
   // Joystick calibration
-  counter = 500; // Initial delay of 500 ms before starting main loop
+  // counter = 500; // Initial delay of 500 ms before starting main loop
   uint8_t total_samples = 0;
   uint32_t total_throttle = 0;
   while (total_samples < 100) // Wait for initial delay to finish
@@ -244,7 +244,6 @@ int main(void)
   }
   throttle_offset = total_throttle / 100;
   /* Infinite loop */
-  // volatile uint32_t loopCounter = 1500;
   while (1)
   {
 
